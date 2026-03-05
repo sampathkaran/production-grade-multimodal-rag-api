@@ -1,0 +1,108 @@
+Convert this eraser.io ERD to PostgreSQL SQL with the following specifications
+1. Use PostgreSQL with pgcrypto and vector extensions 
+2. All UUIDs should use gen_random_uuid() as default 
+3. Use TIMESTAMPTZ DEFAULT now() for all timestamps
+4. Use this exact syntax for the fts column: fts tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED 
+5. Use the TEXT datatype instead of string
+6. Use inline foreign key syntax only: column_name TEXT NOT NULL REFERENCES table(column) ON DELETE CASCADE
+7. Add exactly these indexes with these names. Do not add any additional indexes beyond these two:
+   - CREATE INDEX document_chunks_fts_idx ON document_chunks USING gin (fts);
+   - CREATE INDEX document_chunks_embedding_hnsw_idx ON document_chunks USING hnsw (embedding vector_ip_ops);
+
+users[icon: users, color: blue]{
+id uuid pk
+// for every user we will have a clerk id
+clerk_id string unique "not null"
+createdAt timestamp
+}
+
+projects[icon: folder, color:orange]{
+  id uuid pk
+  name string "not null"
+  description string 
+  clerk_id string fk "not null"
+  createdAt timestamp
+}
+
+project_settings[icon: gear, color:grey]{
+  id uuid pk
+  //every project settting is linked to a project
+  project_id uuid fk "not null"
+  embedding_model string "not null"
+  rag_strategy string "not null"
+  agent_type string "not null"
+  chunks_per_search integer "not null"
+  final_context_size integer "not null"
+  similarity_threshold decimal "not null"
+  number_of_queries integer "not null"
+  reranking_enabled boolean "not null"
+  reranking_model string "not null"
+  vector_weight decimal "not null"
+  keyword_weight decimal "not null"
+  createdAt timestamp 
+}
+
+project_documents[icon: document, color: green]{
+  id uuid pk
+  project_id uuid fk "not null"
+  filename string "not null"
+  s3_key string "not null"
+  file_size integer "not null"
+  file_type string "not null"
+  //top keep track of file status in pipeline
+  processing_status string "default: 'pending'"
+  processing_details json "default: '{}'"
+  task_id string
+  source_type string "default: 'file'"
+  source_url string 
+  clerk_id string fk "not null"
+  createdAt timestamp
+}
+
+//we will also store chunks
+document_chunks[icon: pizza, color: red] {
+  id uuid pk 
+  document_id uuid fk "not null"
+  content string "not null"
+  //index number of chunks
+  chunk_index integer "not null"
+  page_number integer 
+  char_count integer "not null"
+  type json "default: '{}'"
+  original_content json "default: '{}'"
+  embedding "vector(1536)"
+  fts tsvector
+  createdAt timestamp
+}
+
+chats[icon: chat, color: purple]{
+  id uuid pk
+  title string "not null"
+  project_id uuid fk "not null"
+  clerk_id string fk "not null"
+  createdAt timestamp
+}
+
+messages[icon: messenger, color: yellow]{
+  id uuid pk
+  content string "not null"
+  //comes from user or AI
+  role string "default: 'user'"
+  chat_id uuid fk "not null"
+  clerk_id string fk "not null"
+  citations json "default: '[]'"
+  //needed for langsmith
+  trace_id string 
+  createdAt timestamp
+}
+
+//creating the relationship
+users.clerk_id < projects.clerk_id
+users.clerk_id < project_documents.clerk_id
+users.clerk_id < chats.clerk_id
+users.clerk_id < messages.clerk_id
+projects.id - project_settings.project_id
+projects.id < project_documents.project_id
+projects.id < chats.project_id
+project_documents.id < document_chunks.document_id
+chats.id < messages.chat_id
