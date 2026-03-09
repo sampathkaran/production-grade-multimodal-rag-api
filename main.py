@@ -4,6 +4,7 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 import os 
 from routes import users
+from routes import projects
 
 load_dotenv()
 
@@ -25,7 +26,7 @@ app.add_middleware(
 
 # import the routes here 
 app.include_router(users.router)
-
+app.include_router(projects.router)
 
 # Health CheckPoints
 @app.get("/")
