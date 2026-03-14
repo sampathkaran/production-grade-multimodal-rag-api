@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 import os 
 from routes import users
 from routes import projects
+from routes import files
+from routes import chats
 
 load_dotenv()
 
@@ -27,6 +29,8 @@ app.add_middleware(
 # import the routes here 
 app.include_router(users.router)
 app.include_router(projects.router)
+app.include_router(files.router)
+app.include_router(chats.router)
 
 # Health CheckPoints
 @app.get("/")

@@ -1,3 +1,4 @@
+import stat
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from database import supabase
@@ -53,6 +54,8 @@ async def create_projects(project: ProjectCreate, clerk_id: str = Depends(get_cu
         created_project = project_result.data[0]
         project_id = created_project["id"]
 
+
+
         # create default project settings 
         project_settings_result = (
             supabase.table("project_settings")
@@ -71,6 +74,10 @@ async def create_projects(project: ProjectCreate, clerk_id: str = Depends(get_cu
             "keyword_weight" : 0.3  
             }).execute()
             )
+        # # Add these debug lines
+        # print("Settings data:", project_settings_result.data)
+        # print("Settings count:", project_settings_result.count)
+        # print("Full response:", project_settings_result)    
         if not project_settings_result.data:
             # if the project setting creation failed we need to cleanup the project
             supabase.table("projects").delete().eq("id", project_id).execute()
@@ -108,3 +115,51 @@ async def delete_project(project_id: str, clerk_id: str = Depends(get_current_us
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get projects: {str(e)}")
+
+# define the API to read project page
+@router.get("/api/projects/{project_id}")
+async def get_project(project_id: str, clerk_id: str = Depends(get_current_user)):
+    try:
+        project_result = supabase.table("projects").select("*").eq("id", project_id).eq("clerk_id", clerk_id).execute()
+
+        if not project_result.data:
+            # 404 - not found error
+            raise HTTPException(status_code=404, detail="Project not found")
+        
+        return {
+            "message" : "Project retrieved successfully",
+            "data": project_result.data[0]
+        }
+    except Exception as e:
+           raise HTTPException(status_code=500,detail=f"Failed to get projects: {str(e)}")
+
+# define a API to read the chats
+@router.get("/api/projects/{project_id}/chats")
+async def get_project_chats(project_id: str, clerk_id: str = Depends(get_current_user)):
+    try: 
+        chats_result = supabase.table("chats").select("*").eq("project_id", project_id).eq("clerk_id", clerk_id).order("created_at", desc=True).execute()
+
+        return {
+            "message": "Chats retreived successfully",
+            # here we need all the chat so not using [0]
+            "data": chats_result.data or []
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get chats: {str(e)}")
+
+# define an API to read the project settings
+@router.get("/api/projects/{project_id}/project_settings")
+async def get_project_settings(project_id: str):
+    try:
+        settings_result = supabase.table("project_settings").select("*").eq("project_id", project_id).execute()
+        
+        if not settings_result.data:
+            raise HTTPException(status_code=404, detail= "Project settings not found")
+        return {
+            "message": "Project settings retreived successfully",
+            # .execute() returns a list of rows so we grab the first item in it
+            "data" : settings_result.data[0]
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get project settings: {str(e)}")
