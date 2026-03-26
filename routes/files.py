@@ -4,6 +4,7 @@ import uuid
 from fastapi import Depends, HTTPException, APIRouter # API router allows to split the API files
 from auth import get_current_user
 from database import supabase, s3_client, BUCKET_NAME
+from tasks import process_document
 from pydantic import BaseModel
 router = APIRouter(
     tags = ["files"]
@@ -100,12 +101,23 @@ async def uploaded_confirm(project_id:str, confirm_request:dict, clerk_id:str = 
         result = supabase.table("project_documents").update({
             "processing_status": "queued" # we are yet mark status confirm as it has to go through processing pipeline
         }).eq("s3_key", s3_key).eq("project_id", project_id).eq("clerk_id", clerk_id).execute()
-    
+        
+        document = result.data[0]
+        document_id = document['id']
+
         if not result.data:
             raise HTTPException(status_code=404, detail = "Document not found or access denied")
         
 
         # Start background preprocessing of the current file using celery
+        task = process_document.delay(document_id) # delay mean run in the background later,.delay() returns a result object with the task ID
+        task_id = task.id # as it return object not a dict
+        
+        # Save the task id into DB for future reference
+        result = supabase.table("project_documents").update({
+            "task_id" : task_id
+            }).eq("id", document_id).execute()
+         
 
         # Return JSON
         return {
@@ -148,7 +160,17 @@ async def add_website_url(
         if not result.data:
             raise HTTPException(status_code=500, detail = "Failed to create URL record")
         
-        # Start background processing
+        document_id = result.data[0]['id']
+
+        # Start background preprocessing of the current file using celery
+        task = process_document.delay(document_id) # delay mean run in the background later,.delay() returns a result object with the task ID
+        task_id = task.id # as it return object not a dict
+        
+        # Save the task id into DB for future reference
+        result = supabase.table("project_documents").update({
+            "task_id" : task_id
+            }).eq("id", document_id).execute()
+         
 
         return{
             "message": "URL added successfully",
@@ -200,3 +222,31 @@ async def delete_document(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail = f"Failed to delete the document/URL: {str(e)}")
+
+# Create an API to retrieve the chunks
+@router.get("/api/projects/{project_id}/files/{document_id}/chunks")
+async def get_document_chunks(project_id: str, document_id:str, clerk_id:str = Depends(get_current_user)):
+    try:
+        # Validate project exists
+        project_result = supabase.table("projects").select("id").eq("id", project_id).eq('clerk_id', clerk_id).execute()
+
+        if not project_result:
+            raise HTTPException(status_code=404, details="Project not found or access denied")
+
+        # Validate document exists
+        document_result = supabase.table("project_documents").select("id").eq("id", document_id).eq('clerk_id', clerk_id).execute()
+        
+        if not document_result:
+            raise HTTPException(status_code=404, details="Document not found or access denied")
+
+        # retrieve the chunks
+        chunks_result = supabase.table("document_chunks").select("*").eq("document_id", document_id).order('chunk_index').execute()
+
+        return{
+            "message": "Document Chunks Retrieved Successfully",
+            "data": chunks_result.data or []
+        }
+    except Exception as e:
+        print(f"ERROR getting chunks due to {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get document chunks: {str(e)}")
+
