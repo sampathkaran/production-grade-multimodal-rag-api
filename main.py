@@ -3,10 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client 
 from dotenv import load_dotenv
 import os 
-from routes import users
-from routes import projects
-from routes import files
-from routes import chats
+from src.routes.userRoutes import router as userRoutes
+from src.routes.projectRoutes import router as projectRoutes
+from src.routes.projectFilesRoutes import router as projectFilesRoutes
+from src.routes.chatRoutes import router as chatRoutes
 
 load_dotenv()
 
@@ -27,10 +27,15 @@ app.add_middleware(
 )
 
 # import the routes here 
-app.include_router(users.router)
-app.include_router(projects.router)
-app.include_router(files.router)
-app.include_router(chats.router)
+# app.include_router(users.router)
+# app.include_router(projects.router)
+# app.include_router(files.router)
+# app.include_router(chats.router)
+
+app.include_router(userRoutes, prefix="/api/user")
+app.include_router(projectRoutes, prefix="/api/projects")
+app.include_router(projectFilesRoutes, prefix="/api/projects")
+app.include_router(chatRoutes, prefix="/api/projects")
 
 # Health CheckPoints
 @app.get("/")
