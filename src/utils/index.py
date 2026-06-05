@@ -1,6 +1,7 @@
 from urllib.parse import urlparse
 
 def validate_url(url_string: str) -> bool:
+    """This function checks whether a string is a valid URL"""
     if not isinstance(url_string, str) or not url_string.strip(): # input not a string or string is empty or whitespaces
         return False 
     

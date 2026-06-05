@@ -5,7 +5,9 @@ from src.rag.retrieval.utils import (
      get_project_settings,
      get_project_document_ids,
      build_context_from_retrieved_chunks,
-     prepare_prompt_and_invoke_llm
+     prepare_prompt_and_invoke_llm,
+     rrf,
+     generate_query_variations
 )
 
 from typing import List, Dict 
@@ -29,21 +31,50 @@ def retrieve_context(project_id, user_query):
         # Step 2: Retrieve the document IDs for the current project.
         document_ids = get_project_document_ids(project_id)
         print("Found document IDs: ", len(document_ids)) 
+
+        # Step 3: Get the strategy
+        strategy = project_settings['rag_strategy']
+        print(f"\n RAG STRATEGY: {strategy.upper()}")
         
         # Step 3: Generate query embeddings and Perform Vector Search using RPC function
         """
         search through specigic documents to get chunks that are semantically similarly to my query,
         return only hunks above a similarity threshold, sorted relevance, limited to top  N results. 
         """
-        retrieved_chunks = vector_search(user_query, document_ids, project_settings)
-        print(f"Retrieved {len(retrieved_chunks)} relevant chunks from vector search")
 
-        # Step 4: Build Context from retrieved chunks
+        if strategy == 'basic': # perform only vector search
+            print("Executing: Vector Search")
+            retrieved_chunks = vector_search(user_query, document_ids, project_settings)
+            print(f"Retrieved {len(retrieved_chunks)} relevant chunks from vector search")
+        
+        # Step 4: Perform hybrid search
+        elif strategy == 'hybrid': # perform both vector and keyword search
+            print("Executing: Hybrid Search (Vector + Keyword)")
+            retrieved_chunks = hybrid_search(user_query, document_ids, project_settings)
+            print(f"📈 Hybrid search returned: {len(retrieved_chunks)} chunks")
+
+        # Step 5: Multi-query vector search
+        elif strategy == 'multi-query-vector': # this is reference to knowlegebase component
+            print(f"Executing: Multi Query vector Search ({project_settings['number_of_queries']} queries)")
+            retrieved_chunks = multi_query_vector_search(user_query, document_ids, project_settings)
+
+        # Step 6: Multi-query hybrid search
+        elif strategy == "multi-query-hybrid":
+            retrieved_chunks = multi_query_hybrid_search(
+                user_query, document_ids, project_settings
+            )
+            print(f"Multi-query hybrid search resulted in: {len(retrieved_chunks)} chunks")
+        
+        # Step 7: Selecting top k chunks
+        retrieved_chunks = retrieved_chunks[: project_settings["final_context_size"]]
+
+
+        # Step 8: Build Context from retrieved chunks
         # Format the retrieved chunks into structured context with citations
         texts, images, tables, citations = build_context_from_retrieved_chunks(retrieved_chunks)
         #validate_context(texts, images, tables, citations)
 
-       # Step 5: Build  system prompt with injected context
+       # Step 9: Build  system prompt with injected context
        # Add the retrieved document context to the system prompts so the LLM can answer based on the documenmt
     
         return texts, images, tables, citations
@@ -62,9 +93,76 @@ def vector_search (user_query, document_ids, project_settings):
                 'match_threshold': project_settings['similarity_threshold'],
                 'chunks_per_search': project_settings['chunks_per_search']
         }).execute()
-
+       
         return result.data if result.data else []
 
+def keyword_search(user_query, document_ids, project_settings):
+    """Execute keyword search"""
+    keyword_search_result_chunks = supabase.rpc('keyword_search_document_chunks', {
+        'query_text' : user_query,
+        'filter_document_ids': document_ids,
+        'chunks_per_search': project_settings['chunks_per_search']
+    }).execute()
+    
+    return (
+        keyword_search_result_chunks.data if keyword_search_result_chunks.data else []
+    )
+
+def hybrid_search(user_query:str, document_ids: List[str], project_settings: dict) -> List[Dict]:
+    """Execute hybrid search by combining vector and keyword results"""
+
+    # Get results from both search methods
+    vector_results = vector_search(user_query, document_ids, project_settings)
+    keyword_results = keyword_search(user_query, document_ids, project_settings)\
+
+    print(f"📈 Vector search returned: {len(vector_results)} chunks")
+    print(f"📈 Keyword search returned: {len(keyword_results)} chunks")
+
+    
+    # Combine using RRF with configured weights
+    return rrf(
+        [vector_results, keyword_results], [project_settings['vector_weight'], project_settings['keyword_weight']]
+    )
+  
+def multi_query_vector_search(user_query, document_ids, project_settings):
+    """Execute multi-query vector search using query variations"""
+    queries = generate_query_variations(
+        user_query, project_settings["number_of_queries"]
+    )
+
+    print(f"Generated chunks for {len(queries)} query variations")
+
+    all_chunks = []
+    for i, query in enumerate(queries,1):
+        chunks = vector_search(query, document_ids, project_settings)
+        all_chunks.append(chunks)
+        print(
+            f"Vector search for query {i}/{len(queries)}: {query} resulted in: {len(chunks)} chunks"
+        )
+
+    final_chunks = rrf(all_chunks)
+    print(f"RRF Fusion returned {len(final_chunks)} chunks")
+    return final_chunks
+
+def multi_query_hybrid_search(user_query, document_ids, project_settings):
+    """Execute multi-query hybrid search using query variations"""
+    queries = generate_query_variations(
+        user_query, project_settings["number_of_queries"]
+    )
+    print(f"Generated {len(queries)} query variations for hybrid search")
+
+    all_chunks = []
+    for index, query in enumerate(queries):
+        chunks = hybrid_search(query, document_ids, project_settings)
+        all_chunks.append(chunks)
+        print(
+            f"Hybrid search for query {index+1}/{len(queries)}: {query} resulted in: {len(chunks)} chunks"
+        )
+
+    final_chunks = rrf(all_chunks)
+    print(f"RRF Fusion returned {len(final_chunks)} chunks")
+    return final_chunks
+  
 def validate_context(texts: List[str], images: List[str], tables: List[str], citations: List[Dict]) -> None:
     """Validate and print context data in a readable format"""
     print("\n" + "="*80)

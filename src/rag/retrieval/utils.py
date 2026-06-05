@@ -3,6 +3,7 @@ from src.services.supabase import supabase
 from langchain_core.messages import SystemMessage, HumanMessage
 from src.services.llm import openAI
 from typing import Dict, List
+from src.models.index import QueryVariations
 
 def get_project_settings(project_id):
     try:
@@ -217,3 +218,69 @@ def prepare_prompt_and_invoke_llm(user_query: str, texts: List[str], images: Lis
     response = openAI["chat_llm"].invoke(messages)
 
     return response.content
+
+
+def rrf(result_lists:List[List[dict]], weights=None, k=60):
+    """Reciprocal Rank fusion"""
+     
+    if weights is None:
+        weights = [1.0/len(result_lists)] * len(result_lists)
+    
+    # Initialize
+    chunk_scores = {} # stores total points per chunk  → {"A": 19, "B": 19}
+    all_chunks = {} #  stores the actual chunk object → {"A": {...}, "B": {...}}
+
+    for i, chunk_results in enumerate(result_lists):
+        weight = weights[i]
+
+        for position, chunk in enumerate(chunk_results, 1):
+            chunk_id = chunk['id']
+            
+            rrf_score = weight * (1.0/(k+position))
+            
+            if chunk_id in chunk_scores:
+                chunk_scores[chunk_id] = chunk_scores[chunk_id] + rrf_score
+
+            else:
+                chunk_scores[chunk_id] = rrf_score
+                all_chunks[chunk_id]= chunk
+
+            # sorted() takes a list and returns it in order.
+            # chunk_scores.keys() - get the chunk ids
+
+    sorted_chunk_ids = sorted(
+        chunk_scores.keys(), key = lambda x : chunk_scores[x], reverse=True
+    )
+
+    print("\n--- FINAL RANKED RESULTS ---")
+    for rank, cid in enumerate(sorted_chunk_ids, 1):
+        content_preview = all_chunks[cid]['content'][:200]
+        print(f"  rank={rank} | score={chunk_scores[cid]:.6f} | {cid[:8]}… | {content_preview}…")
+
+    return [all_chunks[chunk_id] for chunk_id in sorted_chunk_ids]
+
+
+def generate_query_variations(original_query: str, num_queries: int =3) -> List[str]:
+    """Generate query variations using LLM"""
+    system_prompt = f"""Generate {num_queries-1} alternative ways to phrase this question for document search. Use different keywords and synonyms while maintaining the same intent. Return exactly {num_queries-1} variations."""
+    
+    try:
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=f"Original query: {original_query}")
+        ]
+
+        structured_llm= openAI["chat_llm"].with_structured_output(QueryVariations)
+        result = structured_llm.invoke(messages)
+
+        print(f"✅ Generated {len(result.queries)} query variations")  # ✅ Debug
+        print(f"Queries: {result.queries}")  # ✅ Debug
+
+        return [original_query] + result.queries[: num_queries -1]
+
+    except Exception as e:
+        print(f"❌ Query variation generation failed: {str(e)}")  # ✅ Better error
+        import traceback
+
+        traceback.print_exc()  # ✅ Full stack trace
+        return [original_query]
