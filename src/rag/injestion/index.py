@@ -1,4 +1,3 @@
-from sqlalchemy.orm.base import ATTR_EMPTY
 from src.services.awsS3 import BUCKET_NAME
 from src.rag.injestion.utils import partition_document, analyze_elements, separate_content_types, create_ai_summary, get_page_number
 from src.models.index import ProcessingStatus
