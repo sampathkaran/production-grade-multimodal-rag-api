@@ -159,7 +159,7 @@ def multi_query_hybrid_search(user_query, document_ids, project_settings):
             f"Hybrid search for query {index+1}/{len(queries)}: {query} resulted in: {len(chunks)} chunks"
         )
 
-    final_chunks = rrf(all_chunks)
+    final_chunks = rrf(all_chunks) # not providing weights as wanted to treat all query variations equally
     print(f"RRF Fusion returned {len(final_chunks)} chunks")
     return final_chunks
   
