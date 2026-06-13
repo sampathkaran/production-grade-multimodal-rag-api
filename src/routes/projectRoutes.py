@@ -1,6 +1,7 @@
 from typing import Dict, List 
 from fastapi import APIRouter, HTTPException, Depends
 
+from src.agent.simple_agent.main import create_simple_agent
 from src.services.clerkAuth import get_current_user
 from src.services.supabase import supabase 
 from src.models.index import ProjectCreate, ProjectSettings
@@ -348,11 +349,13 @@ async def send_message(
 ):
     """
     ! Logic Flow:
-    * 1. Get current user clerk_id
-    * 2. Insert the message into the database.
-    * 3. Retrieval
-    * 4. Generation (Retrieved Context + User Message)
-    * 5. Insert the AI Response into the database.
+    * 1. Insert the message into the database
+    * 2. Get user's project settings from the database(to retrieve agent_type)
+    * 3. Get chat history for context
+    * 4. Invoke the simple agent with user's message
+    * 5. Insert the AI Response into the database after invocation complete
+
+    Returns a JSON response with user message and AI response
     """
     try:
         # Step 1 : Insert the message into the database.
@@ -369,19 +372,43 @@ async def send_message(
 
         if not message_creation_result.data:
             raise HTTPException(status_code=422, detail="Failed to create message")
+        
+        current_message_id = message_creation_result.data[0]['id']
+        
+        # Step 2 : Get project settings to retrieve the agent type
+        try:
+            project_settings = get_project_settings(project_id)
+            agent_type = project_settings['data'].get("agent_type", "simple")
 
-        # Step 2 : Retrieval 
-        texts, images, tables, citations = retrieve_context(project_id, message)
+        except Exception as e:
+            # default to "simple" if the settings retrieval fails
+            agent_type = "simple"
+        
+        # Step 3 : Get chat history (excluding current message)
+        chat_history = get_chat_history(chat_id, exclude_message_id=current_message_id )
+        
+        # Step 4: Invoke the appropriate agent based on agent type
+        agent = create_simple_agent(
+            project_id = project_id,
+            model = "gpt-4o",
+            chat_history=chat_history
+        )
+       
+        # Invoke the agent with user's message
+        result = agent.invoke({
+            "messages" : [{"role": "user", "content": message}]
+        })
 
-        # Step 4 : Generation (Retrived Context + User Message)
-
-        print(f"Preparing context and calling LLM...")
-        ai_response = prepare_prompt_and_invoke_llm(user_query=message, texts=texts, images=images, tables=tables)
+        # Extract the final response and citations from the result
+        final_response = result['messages'][-1].content
+        print("\n-------Final Response-------\n")
+        print(final_response)
+        citations = result.get("citations", [])
 
        
         # Step 5: Insert the AI Response into the database.
         ai_response_insert_data = {
-            "content": ai_response,
+            "content": final_response,
             "chat_id": chat_id,
             "clerk_id": current_user_clerk_id,
             "role": MessageRole.ASSISTANT.value,
@@ -404,17 +431,64 @@ async def send_message(
     except HTTPException as e:
         raise e
 
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"An internal server error occurred while creating message: {str(e)}",
+        )
+
     # except Exception as e:
+    #     print(f"ERROR: {str(e)}")  # Add this
+    #     import traceback
+    #     traceback.print_exc()  # Add this - shows full stack trace
     #     raise HTTPException(
     #         status_code=500,
     #         detail=f"An internal server error occurred while creating message: {str(e)}",
     #     )
 
-    except Exception as e:
-        print(f"ERROR: {str(e)}")  # Add this
-        import traceback
-        traceback.print_exc()  # Add this - shows full stack trace
-        raise HTTPException(
-            status_code=500,
-            detail=f"An internal server error occurred while creating message: {str(e)}",
+def get_chat_history(chat_id: str, exclude_message_id:str = None) -> List[Dict[str,str]]:
+    """
+    Fetch and format chat history for agent context.
+    
+    Retrieves the last 10 messages(5 user + 5 assistant) from the chat excluding the current message being processed
+
+    Args:
+        chat_id: The ID of the chat
+        exclude_message_id: Optional message ID to exclude from history
+    
+    Returns:
+        List of message dictonaries with 'role' and 'content' keys
+
+    """
+    try:
+        query = (
+            supabase.table('messages')
+            .select("id, role, content")
+            .eq("chat_id", chat_id)
+            .order("created_at", desc=False)
         )
+
+        # Exclude current message if provided
+        if exclude_message_id:
+            query = query.neq("id", exclude_message_id) # neq is supabase function and exlude message is dropped
+
+        messages_result = query.execute() # NOW it hits the database and returns results
+
+        if not messages_result.data:
+            return []
+       
+       # get last 10 messages (limit to 10 total messages)
+        recent_messages = messages_result.data[-10:]
+
+        # Each iteration adds a dict to the list
+        formatted_history = []
+        for msg in recent_messages:
+            formatted_history.append({
+                "role": msg.get("role", "user"),
+                "content": msg.get("content", "")
+            })
+               
+        return formatted_history
+    except Exception:
+        # If history retrieval fails, return empty list
+        return [] 
