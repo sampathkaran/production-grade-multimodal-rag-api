@@ -20,7 +20,7 @@ def retrieve_context(project_id, user_query):
         RAG Retrieval Pipeline Steps:
             Step 1: Get user's project settings from the database to know similarity threshold, number of queries, etc.
             Step 2: Retrieve the document IDs for thge current project so we can narrow down the search scope to only project
-            step 3: Perform vector search using the RPC function to find the most relevant chunks 
+            step 3: Perform vector or hybrid search using the RPC function to find the most relevant chunks 
 
         """
 
