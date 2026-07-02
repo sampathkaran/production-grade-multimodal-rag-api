@@ -12,6 +12,7 @@ from src.services.llm import openAI
 
 from src.rag.retrieval.index import retrieve_context
 from src.rag.retrieval.utils import prepare_prompt_and_invoke_llm
+from src.agent.supervisor_agent.main import create_supervisor_agent
 
 router = APIRouter(tags = ["projectsRoutes"])# API routes allows to organize your routes 
 """
@@ -259,6 +260,8 @@ async def get_project_settings(project_id:str, current_user_clerk_id:str = Depen
         
         if not project_settings_result.data:
             raise HTTPException(status_code=404, detail="Project settings not found otr you don't have permission to access it")
+        
+        print(project_settings_result.data[0])
 
         return {
             "message": "Project settings retrieved successfully",
@@ -377,7 +380,7 @@ async def send_message(
         
         # Step 2 : Get project settings to retrieve the agent type
         try:
-            project_settings = get_project_settings(project_id)
+            project_settings = await get_project_settings(project_id, current_user_clerk_id)
             agent_type = project_settings['data'].get("agent_type", "simple")
 
         except Exception as e:
@@ -387,12 +390,22 @@ async def send_message(
         # Step 3 : Get chat history (excluding current message)
         chat_history = get_chat_history(chat_id, exclude_message_id=current_message_id )
         
+        print(agent_type, "agent_type")
+
         # Step 4: Invoke the appropriate agent based on agent type
-        agent = create_simple_agent(
-            project_id = project_id,
-            model = "gpt-4o",
-            chat_history=chat_history
-        )
+        if agent_type == 'simple':
+            agent = create_simple_agent(
+                project_id = project_id,
+                model = "gpt-4o",
+                chat_history=chat_history
+            )
+        
+        elif agent_type == 'agentic':
+            agent = create_supervisor_agent(
+                project_id = project_id,
+                model = "gpt-4o",
+                chat_history=chat_history
+            )
        
         # Invoke the agent with user's message
         result = agent.invoke({

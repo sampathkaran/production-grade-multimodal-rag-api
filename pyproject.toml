@@ -13,6 +13,7 @@ dependencies = [
     "ipykernel>=7.2.0",
     "langchain>=1.0.9",
     "langchain-openai==1.0.3",
+    "langchain-tavily>=0.2.18",
     "langgraph-prebuilt<1.1.0",
     "langsmith[openai-agents]>=0.8.9",
     "redis>=7.3.0",
