@@ -16,6 +16,8 @@ dependencies = [
     "langchain-tavily>=0.2.18",
     "langgraph-prebuilt<1.1.0",
     "langsmith[openai-agents]>=0.8.9",
+    "openai>=2.41.0",
+    "ragas>=0.4.3",
     "redis>=7.3.0",
     "scrapingbee>=2.0.2",
     "supabase>=2.28.0",
