@@ -8,6 +8,8 @@ from src.services.webScrapper import scrapingbee_client
 import time
 from unstructured.chunking.title import chunk_by_title
 import os
+from src.config.logging import get_logger, set_project_id
+logger = get_logger(__name__)
 
 # Step 1: Update status to "processing"
 def process_document(document_id: str):
@@ -21,16 +23,23 @@ def process_document(document_id: str):
      - 'processing_details' : What type of elements or metadata did we retrieve from the document to show in the UI.
     """
     
-    try:
+    logger.info("document_processing_started", document_id = document_id)
+
+    try: 
         # update the initial processing status in DB
         update_status_in_database(document_id, ProcessingStatus.PROCESSING)
 
         doc_result = supabase.table("project_documents").select("*").eq("id", document_id ).execute()
         if not doc_result.data:
+            logger.error("document not found", document_id=document_id, )
             raise Exception(f"Failed to get project document record with id: {document_id}")
 
         document = doc_result.data[0] 
-        source_type = document.get('source_type', 'file')     
+        source_type = document.get('source_type', 'file') 
+
+        # get the project id and add it to the log
+        set_project_id(document["project_id"])
+        logger.info("document_retrieved", document_id=document_id, source_type=source_type)    
         
         # We need to update processing status in every step accordingly below
 
@@ -39,10 +48,12 @@ def process_document(document_id: str):
 
         elements_summary, elements = download_and_partition(document_id, document)
 
-        tables = sum(1 for el in elements if el.category == "Table")
-        images = sum(1 for el in elements if el.category == "Image")
-        text_elements = sum(1 for el in elements if el.category in ["NarrativeText", "Title", "Text"])
-        print(f"Extracted: {tables} tables, {images} images, {text_elements} text_elements")
+        # tables = sum(1 for el in elements if el.category == "Table")
+        # images = sum(1 for el in elements if el.category == "Image")
+        # text_elements = sum(1 for el in elements if el.category in ["NarrativeText", "Title", "Text"])
+        # print(f"Extracted: {tables} tables, {images} images, {text_elements} text_elements")
+
+        logger.info("partitioning_completed", document_id=document_id, elements_summary=elements_summary)
         
         update_status_in_database(
             document_id, ProcessingStatus.CHUNKING, {
@@ -55,6 +66,7 @@ def process_document(document_id: str):
         )
         # Step 2: Chunk Elements by title
         chunks, chunking_metrics = chunk_elements(elements)
+        logger.info("chunking_completed", document_id=document_id, total_chunks= chunking_metrics["total_chunks"])
         update_status_in_database(
             document_id, ProcessingStatus.SUMMARISING, {
                 # Storing chunking result to showcase in UI
@@ -64,18 +76,24 @@ def process_document(document_id: str):
 
         # Step 3: Summarising Chunks
         processed_chunks = summarize_chunks(chunks, document_id, source_type)
+        logger.info("summarization_completed", document_id=document_id, chunks_count = len(processed_chunks))
         update_status_in_database(document_id, ProcessingStatus.VECTORIZATION)
         
         
         # Step 4: Vectorization & Storing
-        vectorize_chunks_summary_and_store_in_database(processed_chunks, document_id)  
+        chunk_ids = vectorize_chunks_summary_and_store_in_database(processed_chunks, document_id)
+        logger.info("vectorization_completed", document_id=document_id, stored_chunks = len(chunk_ids))
         update_status_in_database(document_id, ProcessingStatus.COMPLETED)
-
+        logger.info("document_processing_completed", document_id=document_id, chunks_created=len(processed_chunks))
+        
+        
         return {
             "success": True,
             "document_id": document_id,
+            "chunks_created": len(processed_chunks)
         }
     except Exception as e:
+        logger.error("document_processing_failed", document_id=document_id, error=str(e), exc_info=True)
         raise Exception(f"Failed to process document {document_id}: {str(e)}")
 
 def download_and_partition(document_id: str, document:dict):
@@ -85,50 +103,58 @@ def download_and_partition(document_id: str, document:dict):
     else: URL - Crawl the URL
     Partition into elements lke text, tables, images etc and analyze the elements summary and upload to db
     """
-    
-    # Get the source type
-    document_source_type = document['source_type']
+    try:
+        # Get the source type
+        document_source_type = document['source_type']
+        
+        # Crawl URL
+        if document_source_type == "url":
+            url = document['source_url']
+            logger.info("crawling_url", document_id=document_id, url=url)
+            response = scrapingbee_client.get(url)
 
-    if document_source_type == "url":
-       # Crawl URL
-       url = document['source_url']
-       
-       response = scrapingbee_client.get(url)
-
-       # save to temp file
-       temp_file = f"/tmp/{document_id}.html"
-       with open(temp_file, 'wb') as f:
-            f.write(response.content)
-       elements = partition_document(temp_file, 'html', source_type="url")
-       
-    else:
+            # save to temp file
+            temp_file = f"/tmp/{document_id}.html"
+            with open(temp_file, 'wb') as f:
+                    f.write(response.content)
+            logger.info("url_crawl_completed", document_id=document_id)
+            elements = partition_document(temp_file, 'html', source_type="url")
+        
+        
         # Handle file processing
+        if document_source_type == "file":
+            s3_key = document['s3_key']
+            filename = document['filename']
+            file_type = filename.split(".")[-1].lower()
 
-        s3_key = document['s3_key']
-        filename = document['filename']
-        file_type = filename.split(".")[-1].lower()
+            # Download to a temporary location 
+            temp_file = f"/tmp/{document_id}.{file_type}"
+            logger.info("start_downloading_from_s3", document_id=document_id, s3_key=s3_key, file_type=file_type)
+            s3_client.download_file(BUCKET_NAME, s3_key, temp_file)
+            logger.info("succeeded_downloading_from_s3, document_id=docment_id")
+            elements = partition_document(temp_file, file_type, source_type="file")
 
-        # Download to a temporary location 
-        temp_file = f"/tmp/{document_id}.{file_type}"
-        s3_client.download_file(BUCKET_NAME, s3_key, temp_file)
+        elements_summary = analyze_elements(elements)
+        #logger.info("elements_analyzed", document_id=document_id, elements_count=len(elements))    
+        update_status_in_database(document_id, ProcessingStatus.CHUNKING,{
+            "partitioning": {
+                "elements_found": elements_summary
+            }
+        })
+        os.remove(temp_file) # remove the temp file
+        return elements_summary, elements
 
-        elements = partition_document(temp_file, file_type, source_type="file")
-
-    elements_summary = analyze_elements(elements)    
-    update_status_in_database(document_id, ProcessingStatus.CHUNKING,{
-        "partitioning": {
-            "elements_found": elements_summary
-        }
-    })
-    os.remove(temp_file) # remove the temp file
-    return elements_summary, elements
-
+    except Exception as e:
+        logger.error("download_and_partition_failed", document_id=document_id, error=str(e), exc_info=True)
+        raise Exception(f"Failed in Step 1 to download content and partition elements: {str(e)}")
 
 def update_status_in_database(document_id: str, status: ProcessingStatus, details:dict=None):
   
     """
     Update the project document record with the new status and details.
     """
+    logger.info("update_document_status_db", document_id=document_id, status=status.value, has_details=details is not None)
+
     try: 
         # Get current document
         document_result = (
@@ -138,6 +164,7 @@ def update_status_in_database(document_id: str, status: ProcessingStatus, detail
         .execute()
         )
         if not document_result.data:
+            logger.error("document_not_found", document_id=document_id, status=status.value)
             raise Exception(
                 f"Failed to get project document record with id: {document_id}"
             )
@@ -150,7 +177,7 @@ def update_status_in_database(document_id: str, status: ProcessingStatus, detail
         # Add new details if provided
         if details:
             current_details.update(details) # Note : update() - built-in dict method that merges another dictionary into the current one.
-
+            logger.debug("merged_processing_details", document_id=document_id, details_keys=list(details.key()))
         # Update the project document record with the new details
         document_update_result = (
             supabase.table("project_documents")
@@ -165,11 +192,15 @@ def update_status_in_database(document_id: str, status: ProcessingStatus, detail
         )
 
         if not document_update_result.data:
+            logger.error("status_update_failed", document_id=document_id, status=status.value)
             raise Exception(
                 f"Failed to update project document record with id: {document_id}"
             )
 
+        logger.info("document_status_updated_db_success", document_id=document_id, status=status.value, error=str(e), exc_info=True)
+
     except Exception as e:
+        logger.error("update_status_error", document_id=document_id, status=status.value, error=str(e), exc_info=True)
         raise Exception(f"Failed to update status in database: {str(e)}")
 
 
@@ -299,6 +330,7 @@ def vectorize_chunks_summary_and_store_in_database(processed_chunks, document_id
 
         batch_size=10
         all_vectorized_embeddings = []
+        logger.info("vectorization started", document_id=document_id, total_chunks=len(ai_summary_list), batch_size=batch_size)
 
         for i in range(0, len(ai_summary_list), batch_size):
             batch_texts = ai_summary_list[i: i + batch_size]
@@ -310,13 +342,16 @@ def vectorize_chunks_summary_and_store_in_database(processed_chunks, document_id
                 try: 
                     batch_embeddings = openAI['embeddings'].embed_documents(batch_texts)
                     all_vectorized_embeddings.extend(batch_embeddings)
-                    print(f" ✅ Generated embeddings for batch {i//batch_size + 1}/{(len(ai_summary_list) + batch_size - 1)//batch_size}")
+                    #print(f" ✅ Generated embeddings for batch {i//batch_size + 1}/{(len(ai_summary_list) + batch_size - 1)//batch_size}")
+                    logger.info("batch_vectorized", document_id=document_id, batch=f"{i//batch_size + 1}/{(len(ai_summary_list) + batch_size - 1)//batch_size}", chunks_in_batch=len(batch_texts))
                     break
                 except Exception as e:
                     attempt +=1
                     if attempt >= 3:
+                        logger.error("vectorization_batch_failed", document_id=document_id, batch=f"{i//batch_size + 1}", attempt=attempt, error=str(e), exc_info=True)
                         raise e
-                    wait = 2 ** attempt 
+                    wait = 2 ** attempt
+                    logger.warning("vectorization_retry", document_id=document_id, batch=f"{i//batch_size + 1}", attempt=attempt, wait_seconds=wait)
                     time.sleep(wait)
         
         # Step 2: Store Chunks with embeddings
@@ -330,7 +365,7 @@ def vectorize_chunks_summary_and_store_in_database(processed_chunks, document_id
 
         chunk_embedding_pairs = list(zip(processed_chunks, all_vectorized_embeddings))
         stored_chunk_ids = []
-
+        logger.info("storing_chunks_started", document_id=document_id, total_chunks=len(chunk_embedding_pairs))
         for i, (processed_chunk, embedding_vector) in enumerate(chunk_embedding_pairs):
             # Add document_id, chunk_index, and embedding to each processed_chunk
             # chunk_data_with_embedding example:
@@ -353,9 +388,10 @@ def vectorize_chunks_summary_and_store_in_database(processed_chunks, document_id
                 .execute()
             )
             stored_chunk_ids.append(result.data[0]["id"])
-
+            logger.info("chunks_stored_successfully", document_id=document_id, stored_count=len(stored_chunk_ids))
         # print(f"Successfully stored {len(processed_chunks)} chunks with embeddings")
         return stored_chunk_ids
 
     except Exception as e:
+        logger.error("vectorization_and_storage_failed", document_id=document_id, error=str(e), exc_info=True)
         raise Exception(f"Failed to vectorize chunks and store in database: {str(e)}")

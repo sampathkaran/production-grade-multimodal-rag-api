@@ -20,6 +20,7 @@ dependencies = [
     "ragas>=0.4.3",
     "redis>=7.3.0",
     "scrapingbee>=2.0.2",
+    "structlog>=26.1.0",
     "supabase>=2.28.0",
     "unstructured[all-docs]==0.18.11",
     "uvicorn>=0.40.0",
