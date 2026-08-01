@@ -1,5 +1,6 @@
 from typing import Dict, List 
 from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import StreamingResponse
 
 from src.agent.simple_agent.main import create_simple_agent
 from src.services.clerkAuth import get_current_user
@@ -15,6 +16,8 @@ from src.rag.retrieval.utils import prepare_prompt_and_invoke_llm
 from src.agent.supervisor_agent.main import create_supervisor_agent
 
 from src.config.logging import get_logger, set_project_id, set_user_id
+
+import json
 
 logger = get_logger(__name__)
 
@@ -584,3 +587,200 @@ def get_chat_history(chat_id: str, exclude_message_id:str = None) -> List[Dict[s
     except Exception:
         # If history retrieval fails, return empty list
         return [] 
+
+
+# define api for streaming response 
+@router.post("/{project_id}/chats/{chat_id}/messages/stream")
+async def stream_message(
+    project_id: str,
+    chat_id: str,
+    message: MessageCreate,
+    current_user_clerk_id: str = Depends(get_current_user)
+):
+
+    """
+    Stream a message response using Server-Sent Event 
+    """
+
+    set_project_id(project_id)
+    set_user_id(current_user_clerk_id)
+
+    # define the function for streaming response
+    async def event_generator():
+        try:
+            logger.info("sending_message", chat_id=chat_id)
+            
+            # Step 1: Insert the user message into database
+            message_content = message.content
+            message_insert_data = {
+                "content": message_content,
+                "chat_id": chat_id,
+                "clerk_id": current_user_clerk_id,
+                "role": MessageRole.USER.value
+            }
+            
+            message_creation_result =(
+                supabase.table("messages").insert(message_insert_data).execute()
+            )
+
+            if not message_creation_result.data:
+                logger.error("message_creation_failed", chat_id=chat_id, reason="no_data_returned")
+                yield f"event: error\ndata: {json.dumps({'message': 'Failed to create message'})}\n\n"
+                return
+
+            user_message_data = message_creation_result.data[0]
+            current_message_id = user_message_data['id']
+            logger.info("user_message_created", message_id=current_message_id, chat_id=chat_id)
+        
+            # Step 2: Get project setting for agent type
+            try:
+                project_settings = await get_project_settings(project_id, current_user_clerk_id)
+                agent_type = project_settings['data'].get("agent_type", "simple")
+            
+            except Exception as e:
+                logger.warning("settings_retrieval_failed_defaulting_to_simple", error=str(e))
+                agent_type = "simple"
+
+            logger.info("agent_type_determined", agent_type=agent_type)
+
+            # step 3: Get chat history
+            chat_history = get_chat_history(chat_id, exclude_message_id=current_message_id)
+            logger.info("chat_history_retrieved", chat_id=chat_id, history_length=len(chat_history))  # Added: Chat history log
+        
+            # Step 4: Create the appropriate agent
+            if agent_type == "simple":
+                agent = create_simple_agent(
+                    project_id=project_id, 
+                    model="gpt-4o", 
+                    chat_history=chat_history
+                )
+            else: #agentic
+                agent = create_supervisor_agent(
+                    project_id=project_id,
+                    model="gpt-4o",
+                    chat_history=chat_history
+                    )
+            logger.info("invoking_agent", chat_id=chat_id, agent_type=agent_type)
+
+            # Step 4 - Stream the response
+            # instead of agent.invoke(...) we do streaming
+            
+            # setup empty variables
+            full_response = "" # and empty text box that we will keep adding words as the AI generates them
+            citations = [] # an empty list of source reference
+
+            # set up few flags like switch OFF we wil turn it ON as certain events occur
+            passed_guardrail = False
+            tool_called = False
+            is_final_response = False
+
+            async for event in agent.astream_events(
+                {"messages": [{"role": "user", "content": message_content}]},
+                version = "v2"):
+                kind = event['event']
+                tags = event.get("tags", []) # tag to be used in filtering condition
+                name = event.get("name", "")
+                
+                # Detect the guradrail completion, sample gurardrail event below
+                """
+                event = {
+                        "event": "on_chain_end",
+                        "name": "guardrail",
+                        "run_id": "3f8a2b1c-...",
+                        "tags": ["seq:step:0"],
+                        "metadata": {},
+                        "data": {
+                            "output": {"guardrail_passed": True, "messages": []}
+                        }
+                    }
+                """
+                if kind == "on_chain_end" and name == "guardrail":
+                    # check if the guradrail is passed or failed
+                    output = event.get("data", {}).get("output", {})
+                    if output.get("guardrail_passed") == False:
+                        # stream the reject message to user
+                        messages = output.get("messages", [])
+                        if messages:
+                            rejection_content = messages[0].content if hasattr(messages[0], 'content') else str(messages[0])
+                            full_response = rejection_content
+                            yield f"event: token\ndata: {json.dumps({'content': rejection_content})}\n\n"
+                    else:
+                        passed_guardrail = True
+                        yield f"event: status\ndata: {json.dumps({'status': 'Thinking...'})}\n\n"
+
+                # status updats for tool calls
+                elif kind == "on_tool_start":
+                    tool_called = True
+                    tool_name = name
+                    if tool_name == "rag_search":
+                        yield f"event: status\ndata: {json.dumps({'status': 'Searching Documents...'})}\n\n"
+                    elif tool_name == "search_web":
+                        yield f"event: status\ndata: {json.dumps({'status': 'Searching the web...'})}\n\n"
+
+                # Detect the tool ends and update the stauts - next model call will be final response
+                elif kind == "on_tool_end":
+                    is_final_response = True
+                    yield f"event: status\ndata: {json.dumps({'status': 'Generating Response...'})}\n\n"
+                
+                # Now stream the token only from the LLM model call
+                elif kind == "on_chat_model_stream":
+                # Stream if 
+                    # 1. Guradrail passed
+                    # 2. Either tool finished OR no tool was called yet AND
+                    # 3. Has the seq:step:1 tag (part of the main agent ie supervisor agent)
+                    if passed_guardrail and (is_final_response or not tool_called) and 'seq:step:1' in tags:
+                        chunk = event['data'].get("chunk")
+
+                        if chunk:
+                            content = chunk.content if hasattr(chunk, 'content') else ""
+                            if content:
+                                full_response += content
+                                yield f"event: token\ndata: {json.dumps({'content': content})}\n\n"
+                
+                # capture citations from the final state
+                elif kind == "on_chain_end" and name == "LangGraph" and tags == []:
+                    # this is the outermost Langgraph ending
+                    output = event.get("data", {}).get("output", {})
+                    if isinstance(output, dict) and "citations" in output:
+                        citations = output["citations"]
+        
+            logger.info("streaming_agent_response_completed", chat_id=chat_id, response_length=len(full_response), citations_count=len(citations)) # Added: Completed log       
+            
+            # step 6: Insert AI response into database
+            ai_response_insert_data = {
+                "content": full_response,
+                "chat_id": chat_id,
+                "clerk_id": current_user_clerk_id,
+                "role": MessageRole.ASSISTANT.value,
+                "citations": citations,
+            }
+            
+            ai_response_creation_result = (
+                supabase.table("messages").insert(ai_response_insert_data).execute()
+            )
+
+            if not ai_response_creation_result.data:
+                logger.error("ai_response_creation_failed", chat_id=chat_id, reason="no_data_returned")  # Added: Error log
+                yield f"event: error\ndata: {json.dumps({'message': 'Failed to save AI response'})}\n\n"
+                return
+            
+            ai_message_data = ai_response_creation_result.data[0]
+            logger.info("message_sent_successfully", chat_id=chat_id, ai_message_id=ai_message_data["id"])  # Added: Success log
+
+            # Step 7: Send done event
+            yield f"event: done\ndata: {json.dumps({'userMessage': user_message_data, 'aiMessage': ai_message_data})}\n\n"
+
+    
+        except Exception as e:
+            logger.error("send_message_error", chat_id=chat_id, error=str(e), exc_info=True)  # Added: Exception log
+            yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+
+    # instead of using return {"message": "...", "data": ...} as final FASTAPI return function for non streaming data we use below for streaming
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        }
+    )
