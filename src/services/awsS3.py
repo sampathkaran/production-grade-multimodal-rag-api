@@ -1,5 +1,5 @@
 import boto3
-from src.config import app_config
+from src.config.index import app_config
 
 s3_client = boto3.client("s3",
           aws_access_key_id = app_config['aws_access_key_id'],

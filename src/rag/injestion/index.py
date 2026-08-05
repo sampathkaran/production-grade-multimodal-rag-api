@@ -177,7 +177,7 @@ def update_status_in_database(document_id: str, status: ProcessingStatus, detail
         # Add new details if provided
         if details:
             current_details.update(details) # Note : update() - built-in dict method that merges another dictionary into the current one.
-            logger.debug("merged_processing_details", document_id=document_id, details_keys=list(details.key()))
+            logger.debug("merged_processing_details", document_id=document_id, details_keys=list(details.keys()))
         # Update the project document record with the new details
         document_update_result = (
             supabase.table("project_documents")
@@ -197,7 +197,7 @@ def update_status_in_database(document_id: str, status: ProcessingStatus, detail
                 f"Failed to update project document record with id: {document_id}"
             )
 
-        logger.info("document_status_updated_db_success", document_id=document_id, status=status.value, error=str(e), exc_info=True)
+        logger.info("document_status_updated_db_success", document_id=document_id, status=status.value)
 
     except Exception as e:
         logger.error("update_status_error", document_id=document_id, status=status.value, error=str(e), exc_info=True)

@@ -12,7 +12,7 @@ silence_noisy_loggers()
 app = Celery(
     "Document Processor", # Name of the celery app
     broker = app_config['redis_url'], # redis has 16 databses we will point to first where tasks are queued
-    backend = "redis://localhost:6379/1" # where results are stored such as success, failure of tasks etc
+    #backend = "redis://localhost:6379/1" # where results are stored such as success, failure of tasks etc
 )
 
 

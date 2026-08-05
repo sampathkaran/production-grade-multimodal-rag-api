@@ -25,3 +25,4 @@ dependencies = [
     "unstructured[all-docs]==0.18.11",
     "uvicorn>=0.40.0",
 ]
+
