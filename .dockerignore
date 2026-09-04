@@ -72,3 +72,6 @@ README.md
 show/
 sql
 user_requirements.md
+
+build.log
+terraform-deployment/
