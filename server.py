@@ -31,7 +31,9 @@ app.add_middleware(LoggingMiddleware)
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"], # This is where the frontend is running
+    allow_origins=[
+    "https://sampathkaran-production-grade-multi-gamma.vercel.app",
+    "http://localhost:3000",], # This is where the frontend is running
     allow_credentials=True,
     allow_methods=["*"], # All methods are allowed
     allow_headers=["*"]
