@@ -1,0 +1,1 @@
+uv run python -c "import sys; print(sys.executable)" -- get the path and paste in the python intrepreter
